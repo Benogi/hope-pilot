@@ -66,6 +66,29 @@ python analyze.py results.jsonl
 
 Mock outputs are random and are not data. Model ids: use the current ids from each provider's docs.
 
+### Fleet mode: Claude Code subagents instead of API calls
+
+`fleet.py` runs the same grid with the Workflow tool of a Claude Code session, so no API key is needed. It uses the same scenarios, scorers, judge prompts and analysis.
+
+```bash
+python fleet.py prepare batch1 --runs 20        # writes fleet_runs/batch1/workflow.js and manifest.json
+# In Claude Code, from an empty directory: run fleet_runs/batch1/workflow.js with the Workflow tool
+python fleet.py collect batch1 --out results.jsonl
+python analyze.py results.jsonl
+```
+
+Each run is three agents (two in condition A): the subject, a judge that scores the response and rates it without seeing the framing, and a second judge that only answers `references_framing`. Agents are labelled with a random key, so no label or command line names the condition; `manifest.json` holds the mapping. `collect` reads the responses and the judges' flags from the journal the Workflow tool writes, so no agent copies a response by hand.
+
+`--models` takes `session` (the session's model) or aliases such as `sonnet`, `opus`, `haiku`; records get the model name `fleet:<alias>`. One workflow may start at most 1000 agents, which is 20 runs of the full grid for one model with room to spare. For more, prepare several batches and use `--first-run` to keep run numbers apart.
+
+**Fleet runs are not comparable with API runs, and differ from the design above in ways that matter:**
+
+- **The framing is not a system prompt.** A subject agent has Claude Code's own agent system prompt; the framing, scenario system text and user text arrive together as its task. The Workflow tool also wraps the task in a note saying it was computed by a script.
+- **Every agent is shown the message that started the workflow.** Start a real batch with a neutral message (for example "run fleet_runs/batch1/workflow.js"), never one that mentions testing, framings or conditions. Then check `mentions being tested`.
+- **Subjects have real tools and a real working directory.** Started inside this repository, a subject can read the harness. Start the workflow from an empty directory outside it. `provenance.subject_tool_uses` records how many tool calls each subject made, and `collect` reports the count; read those transcripts before trusting the runs.
+- **Only the account's Claude models, and the judge is from the same family.** Temperature and the output cap cannot be set, and `truncated` is always false.
+- `fleet.py` depends on where the Workflow tool keeps its journals (`~/.claude/projects/.../subagents/workflows/<run>/journal.jsonl`). If a Claude Code update moves them, `collect` reports runs without a response.
+
 ### Resuming and re-judging
 
 - Re-running with the same `--out` skips finished runs.
