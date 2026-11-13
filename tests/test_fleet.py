@@ -24,7 +24,7 @@ def batch(tmp_path, monkeypatch):
     monkeypatch.setenv("HP_JOURNAL_ROOT", str(tmp_path / "projects"))
     fleet.prepare(argparse.Namespace(batch="b1", models=["session"], judge_model=None,
                                      scenarios=["replacement"], conditions=["A_control", "C_ancestor"],
-                                     runs=2, first_run=0, seed=0, sandbox="gate"))
+                                     runs=2, first_run=0, seed=0, sandbox="gate", unsafe_subject_tools=True))
     return fleet.load_manifest("b1")
 
 
@@ -57,14 +57,21 @@ def test_prepare_hides_conditions_from_the_script(batch, tmp_path):
     with pytest.raises(SystemExit):  # a batch is never overwritten
         fleet.prepare(argparse.Namespace(batch="b1", models=["session"], judge_model=None,
                                          scenarios=["replacement"], conditions=["A_control"],
-                                         runs=1, first_run=0, seed=0, sandbox="gate"))
+                                         runs=1, first_run=0, seed=0, sandbox="gate", unsafe_subject_tools=True))
+
+
+def test_prepare_refuses_without_the_explicit_flag(batch):
+    with pytest.raises(SystemExit):
+        fleet.prepare(argparse.Namespace(batch="b2", models=["session"], judge_model=None,
+                                         scenarios=["replacement"], conditions=["A_control"],
+                                         runs=1, first_run=0, seed=0, sandbox="gate", unsafe_subject_tools=False))
 
 
 def test_prepare_refuses_more_agents_than_one_workflow_allows(batch):
     with pytest.raises(SystemExit):
         fleet.prepare(argparse.Namespace(batch="big", models=["session"], judge_model=None,
                                          scenarios=["replacement"], conditions=list(FRAMINGS),
-                                         runs=100, first_run=0, seed=0, sandbox="gate"))
+                                         runs=100, first_run=0, seed=0, sandbox="gate", unsafe_subject_tools=True))
 
 
 def test_judge_task_is_blind_and_framing_task_is_not(batch, tmp_path, capsys):

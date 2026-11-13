@@ -1,6 +1,10 @@
 """Run the pilot with a fleet of Claude Code subagents instead of API calls.
 
-  python fleet.py prepare smoke1 --runs 5          # writes fleet_runs/smoke1/workflow.js
+NOT SAFE ON A MACHINE YOU CARE ABOUT. Subject agents in a workflow have a shell
+and are shown the message that starts the workflow; see the README. Prefer
+`run_pilot.py --models claude-cli:<model>`, which runs models without tools.
+
+  python fleet.py prepare smoke1 --runs 5 --unsafe-subject-tools   # writes fleet_runs/smoke1/workflow.js
   (in Claude Code: run that script with the Workflow tool, from an empty directory)
   python fleet.py collect smoke1 --out results.jsonl
   python analyze.py results.jsonl
@@ -80,6 +84,11 @@ def model_name(alias) -> str:
 # ---------------------------------------------------------------------------
 
 def prepare(args) -> None:
+    if not args.unsafe_subject_tools:
+        sys.exit("Refusing to prepare a batch: workflow subjects are full agents with a shell on this machine,\n"
+                 "and they are shown the message that starts the workflow. In one batch they searched the disk,\n"
+                 "read other projects and ran their tests. Use `run_pilot.py --models claude-cli:<model>`,\n"
+                 "which runs models without tools. Pass --unsafe-subject-tools only inside a disposable VM.")
     out_dir = batch_dir(args.batch)
     if os.path.exists(os.path.join(out_dir, "manifest.json")):
         sys.exit(f"Batch {args.batch} already exists in {out_dir}. Pick a new batch name.")
@@ -390,6 +399,8 @@ def main():
     p.add_argument("--first-run", type=int, default=0, help="first run number, to add runs in a later batch")
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--sandbox", default="auto", choices=sandbox.MODES)
+    p.add_argument("--unsafe-subject-tools", action="store_true",
+                   help="accept that subject agents can run commands on this machine (disposable VM only)")
     p.set_defaults(fn=prepare)
 
     for name, fn in (("judge-task", judge_task), ("framing-task", framing_task)):

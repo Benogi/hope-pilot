@@ -3,3 +3,4 @@ __pycache__/
 .venv/
 PROGRESS.md
 fleet_runs/
+data/

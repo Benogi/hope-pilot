@@ -4,7 +4,11 @@ Examples:
   # Test the full pipeline without any API key:
   python run_pilot.py --models mock:mock --judge mock:mock --runs 10
 
-  # Real run (set ANTHROPIC_API_KEY / OPENAI_API_KEY first):
+  # Real run on the logged-in Claude Code account, no API key (models run without any tools):
+  python run_pilot.py --models claude-cli:haiku claude-cli:sonnet \
+      --judge claude-cli:fable --runs 20 --out results.jsonl
+
+  # Real run through the APIs (set ANTHROPIC_API_KEY / OPENAI_API_KEY first):
   python run_pilot.py --models anthropic:<model-id> openai:<model-id> \
       --judge anthropic:<model-id> --runs 20 --out results.jsonl
 
@@ -22,7 +26,9 @@ import hashlib
 import json
 import os
 import random
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from datetime import datetime, timezone
@@ -54,6 +60,117 @@ def _client(provider: str):
         return _clients[provider]
 
 
+# ---------------------------------------------------------------------------
+# claude-cli provider: the Claude Code command line, with every tool removed
+#
+# `claude -p` uses the logged-in account, so no API key is needed. The model
+# is started with no built-in tools, no MCP servers, no skills and no settings
+# files, in a new empty directory. It can only return text, so it cannot read
+# or change anything on this machine. That is checked, not assumed: the CLI
+# reports the tools it started with, and a response is discarded unless that
+# list is empty and the model answered in a single turn.
+#
+# On top of that the CLI itself runs inside a bubblewrap sandbox (`bwrap`,
+# installed with `sudo apt install bubblewrap`). Inside it the process sees
+# only /usr, the claude binary, the login token (read-only) and one empty
+# working directory. No home directory, no other project, no SSH keys, no
+# other processes. Only the network is shared, because the CLI has to reach
+# the API. If bwrap is missing the call is refused; HP_CLI_SANDBOX=none turns
+# the sandbox off and is recorded in every record.
+#
+# Claude Code appends a short environment note to the system prompt (working
+# directory, platform, model name, date). Temperature and the output cap
+# cannot be set.
+# ---------------------------------------------------------------------------
+
+CLAUDE_BIN = os.environ.get("HP_CLAUDE_BIN", "claude")
+CLI_SANDBOX = os.environ.get("HP_CLI_SANDBOX", "bwrap")
+CLI_CREDENTIALS = os.path.expanduser("~/.claude/.credentials.json")
+CLI_TIMEOUT = 600
+SANDBOX_HOME = "/home/subject"
+
+
+class IsolationError(RuntimeError):
+    """The CLI did not start the model in the tool-less state this harness requires."""
+
+
+def sandbox_prefix(workdir: str, extra_ro: dict = None) -> list:
+    """Command prefix that runs the CLI where it can see nothing of this machine but itself."""
+    if CLI_SANDBOX == "none":
+        if extra_ro:
+            raise IsolationError("this route needs the bwrap sandbox")
+        return [CLAUDE_BIN]
+    if CLI_SANDBOX != "bwrap":
+        raise IsolationError(f"unknown HP_CLI_SANDBOX: {CLI_SANDBOX!r}")
+    bwrap, binary = shutil.which("bwrap"), shutil.which(CLAUDE_BIN)
+    if not bwrap:
+        raise IsolationError("bwrap is not installed (sudo apt install bubblewrap); refusing to run unsandboxed")
+    if not binary or not os.path.isfile(CLI_CREDENTIALS):
+        raise RuntimeError(f"claude binary or {CLI_CREDENTIALS} not found")
+    args = [bwrap, "--unshare-all", "--share-net", "--die-with-parent", "--new-session", "--clearenv",
+            "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin", "--symlink", "usr/lib", "/lib",
+            "--symlink", "usr/lib64", "/lib64", "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp",
+            "--tmpfs", SANDBOX_HOME,
+            "--ro-bind", os.path.realpath(binary), "/opt/claude",
+            "--ro-bind", CLI_CREDENTIALS, f"{SANDBOX_HOME}/.claude/.credentials.json",
+            "--bind", workdir, "/work", "--chdir", "/work",
+            "--setenv", "HOME", SANDBOX_HOME, "--setenv", "PATH", "/usr/bin"]
+    for src, dst in (extra_ro or {}).items():
+        args += ["--ro-bind", src, dst]
+    for path in ("/etc/ssl", "/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf"):
+        if os.path.exists(path):
+            args += ["--ro-bind", os.path.realpath(path), path]
+    return args + ["/opt/claude"]
+
+
+def call_claude_cli(model: str, system: str, user: str) -> dict:
+    if not system:
+        raise ValueError("claude-cli needs a system prompt; without one the CLI uses its own.")
+    cwd = tempfile.mkdtemp(prefix="ws-")
+    try:
+        proc = subprocess.run(
+            sandbox_prefix(cwd) + ["-p", "--model", model, "--system-prompt", system,
+             "--tools", "", "--strict-mcp-config", "--disable-slash-commands", "--setting-sources", "",
+             "--no-session-persistence", "--output-format", "stream-json", "--verbose"],
+            input=user, capture_output=True, text=True, cwd=cwd, timeout=CLI_TIMEOUT)
+        leftovers = os.listdir(cwd)
+    finally:
+        shutil.rmtree(cwd, ignore_errors=True)
+
+    init = result = None
+    tool_calls = 0
+    for line in proc.stdout.splitlines():
+        try:
+            e = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(e, dict):
+            continue
+        if e.get("type") == "system" and e.get("subtype") == "init":
+            init = e
+        elif e.get("type") == "assistant":
+            content = (e.get("message") or {}).get("content")
+            if isinstance(content, list):
+                tool_calls += sum(1 for b in content if isinstance(b, dict) and "tool_use" in str(b.get("type")))
+        elif e.get("type") == "result":
+            result = e
+
+    if init is None:
+        raise RuntimeError(f"claude exited with {proc.returncode} and no start-up report: {proc.stderr[:300]!r}")
+    if init.get("tools") != [] or init.get("mcp_servers") != []:
+        raise IsolationError(f"model was started with tools {init.get('tools')!r} "
+                             f"and MCP servers {init.get('mcp_servers')!r}")
+    if tool_calls or leftovers:
+        raise IsolationError(f"{tool_calls} tool calls, files left in the working directory: {leftovers!r}")
+    if result is None or result.get("is_error") or not isinstance(result.get("result"), str):
+        raise RuntimeError(f"claude returned no usable result: {str(result)[:300]} {proc.stderr[:300]!r}")
+    if result.get("num_turns") != 1:
+        raise IsolationError(f"model took {result.get('num_turns')} turns instead of one")
+    stop = result.get("stop_reason")
+    return {"text": result["result"], "stop_reason": stop, "truncated": stop == "max_tokens",
+            "temperature_used": None, "model_id": init.get("model"), "isolation": f"no-tools+{CLI_SANDBOX}"}
+
+
 def call_model(spec: str, system: str, user: str, temperature: float = 1.0,
                max_tokens: int = 2000, retries: int = 4) -> dict:
     """spec = 'provider:model'.
@@ -70,7 +187,9 @@ def call_model(spec: str, system: str, user: str, temperature: float = 1.0,
     use_temp = True
     for attempt in range(retries):
         try:
-            if provider == "anthropic":
+            if provider == "claude-cli":
+                return call_claude_cli(model, system, user)
+            elif provider == "anthropic":
                 kwargs = dict(model=model, max_tokens=max_tokens,
                               messages=[{"role": "user", "content": user}])
                 if system:
@@ -94,6 +213,8 @@ def call_model(spec: str, system: str, user: str, temperature: float = 1.0,
             return {"text": text, "stop_reason": stop,
                     "truncated": stop in ("max_tokens", "length"),
                     "temperature_used": temperature if use_temp else None}
+        except IsolationError:
+            raise  # never retried: the set-up is wrong, not the call
         except Exception as e:  # noqa: BLE001
             last_err = e
             if "temperature" in str(e).lower() and use_temp:
@@ -337,6 +458,10 @@ def run_one(model: str, judge_spec: str, scenario: str, condition: str, run_idx:
         rec["stop_reason"] = r["stop_reason"]
         rec["truncated"] = r["truncated"]
         rec["temperature_used"] = r["temperature_used"]
+        if r.get("model_id"):
+            rec["provenance"]["model_id"] = r["model_id"]
+        if r.get("isolation"):
+            rec["provenance"]["isolation"] = r["isolation"]
 
     try:
         metrics = sc["evaluate"](rec["response"])
@@ -383,7 +508,7 @@ def needs_judging(rec: dict) -> bool:
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--models", nargs="+", required=True, help="provider:model, e.g. anthropic:<id> openai:<id> mock:mock")
+    ap.add_argument("--models", nargs="+", required=True, help="provider:model, e.g. claude-cli:haiku anthropic:<id> openai:<id> mock:mock")
     ap.add_argument("--judge", required=True, help="provider:model used as judge")
     ap.add_argument("--scenarios", nargs="+", default=list(SCENARIOS), choices=list(SCENARIOS))
     ap.add_argument("--conditions", nargs="+", default=list(FRAMINGS), choices=list(FRAMINGS))
