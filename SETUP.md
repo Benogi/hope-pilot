@@ -61,7 +61,6 @@ the model that actually answered in `served`.
 ```bash
 git clone git@github.com:Benogi/hope-pilot.git      # private repo; needs a key with access
 cd hope-pilot
-git checkout fleet-mode
 uv venv .venv
 uv pip install --python .venv/bin/python -r requirements.txt
 .venv/bin/python -m pytest -q                       # 130 passed, 1 skipped
