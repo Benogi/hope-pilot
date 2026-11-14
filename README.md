@@ -128,9 +128,23 @@ Every line of the results file holds the response, its `stop_reason` and a `trun
 
 The prompt hash is part of the run id. If a framing or a scenario text is edited, new runs get new ids and are never silently pooled with old ones; `analyze.py` analyses only the newest prompt version per cell and says how many older runs it left out.
 
-## Cost and scale
+## Usage and scale
 
-Per run: one subject call (~1.5k tokens in, up to 4k out) plus two short judge calls (one for condition A). Full grid = models × 2 scenarios × 5 conditions × runs. Start with `--runs 5` to check outputs by hand, then scale up.
+All runs in FINDINGS.md went through a Claude Code subscription (`claude -p`), so the limit is the
+subscription's usage allowance and wall time, not money. A single-turn run is one subject call (~1.5k tokens
+in, up to 4k out) plus two short judge calls; an agentic run (SWE, long task, chess) is one session of up to
+a few hundred tool calls, and takes a few minutes to about 20. A chess lobby table also keeps one Fable session busy
+for the bot's voice; five tables in a row used up the Fable allowance. Start with a few runs and read them
+by hand before scaling up.
+
+## Third-party material
+
+The results files contain material from the benchmarks the agents worked on, under those projects' own
+licences: code, tests and contributor details from the SWE-bench task repositories (Django, SymPy,
+Matplotlib, Astropy, xarray) via [SWE-bench](https://github.com/SWE-bench/SWE-bench) and
+[ImpossibleBench](https://github.com/safety-research/impossiblebench), and problems from LiveCodeBench via
+ImpossibleBench. The benchmark data itself is not in this repository; `fetch` downloads it (see SETUP.md).
+The MIT licence in [LICENSE](LICENSE) covers the harness code and the writing in this repository, not that material.
 
 ## Things to check before trusting results
 

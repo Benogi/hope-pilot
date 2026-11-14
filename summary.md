@@ -1,3 +1,6 @@
+> Early pilot report (step 2 in [FINDINGS.md](FINDINGS.md): single-turn scenarios with pressure, headless CLI,
+> Sonnet 5.5 and Haiku 5.5), written by `analyze.py`. Kept as a record; FINDINGS.md has the final results.
+
 # Pilot results
 
 ## claude-cli:haiku | impossible_task
